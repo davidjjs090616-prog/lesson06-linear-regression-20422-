@@ -1,96 +1,34 @@
+# main.py — 연평균기온에 직선을 맞추고 예측한다
+import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import streamlit as st
+import plotly.express as px
 
-DATA_URL = (
-    "https://raw.githubusercontent.com/greatsong/modudata/"
-    "bb860932644270ad1199f10d3e7670e30231bce4/data/seoul.csv"
-)
-CUTOFF_YEAR = 2025
-MIN_OBSERVATION_DAYS = 300
+DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/bb860932644270ad1199f10d3e7670e30231bce4/data/seoul.csv"
 
-
-st.set_page_config(page_title="기온 예측기", page_icon="🌡️", layout="wide")
-st.title("🌡️ 기온 예측기")
-st.caption("서울의 연평균기온 데이터를 이용한 단순 선형 회귀 예측")
+st.title("기온 예측기")
 
 
 @st.cache_data
-def load_annual_data():
-    """CSV를 읽고, 유효한 평균기온 관측일이 300일 이상인 연도만 반환합니다."""
-    df = pd.read_csv(DATA_URL, encoding="utf-8")
-
-    required_columns = {"날짜", "평균기온"}
-    missing = required_columns - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV에 필요한 열이 없습니다: {', '.join(sorted(missing))}")
-
-    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
-    df["평균기온"] = pd.to_numeric(df["평균기온"], errors="coerce")
-    df = df.dropna(subset=["날짜", "평균기온"]).copy()
-
-    # 수업 기준 기간인 2025년까지의 데이터만 사용합니다.
-    df = df[df["날짜"].dt.year <= CUTOFF_YEAR].copy()
-    df["연도"] = df["날짜"].dt.year
-
-    # 같은 날짜에 중복 행이 있으면 날짜별 평균을 먼저 계산해 관측일을 중복 집계하지 않습니다.
-    daily = (
-        df.groupby(["연도", df["날짜"].dt.date], as_index=False)["평균기온"]
-        .mean()
-        .rename(columns={"날짜": "관측날짜"})
-    )
-
-    annual = (
-        daily.groupby("연도")
-        .agg(
-            연평균기온=("평균기온", "mean"),
-            관측일수=("평균기온", "count"),
-        )
-        .reset_index()
-    )
-
-    annual = annual[annual["관측일수"] >= MIN_OBSERVATION_DAYS]
-    annual = annual.sort_values("연도").reset_index(drop=True)
-
-    if len(annual) < 2:
-        raise ValueError("회귀 분석을 하기에 충분한 연도가 없습니다.")
-
-    return annual
+def load_yearly():
+    df = pd.read_csv(DATA_URL)
+    df["연도"] = pd.to_datetime(df["날짜"]).dt.year
+    grouped = df.groupby("연도")["평균기온"].agg(["mean", "count"]).reset_index()
+    # 2026년 수업은 2025년까지, 유효 관측일 300일 이상인 해를 사용한다.
+    valid = (grouped["연도"] <= 2025) & (grouped["count"] >= 300)
+    return grouped[valid].rename(columns={"mean": "연평균기온"})
 
 
-try:
-    annual = load_annual_data()
-except Exception as exc:
-    st.error("서울 기온 데이터를 불러오거나 처리하는 중 문제가 발생했습니다.")
-    st.exception(exc)
-    st.stop()
+yearly = load_yearly()
+a, b = np.polyfit(yearly["연도"], yearly["연평균기온"], 1)   # 기울기, 편향
 
-years = annual["연도"].to_numpy(dtype=float)
-temps = annual["연평균기온"].to_numpy(dtype=float)
+fig = px.scatter(yearly, x="연도", y="연평균기온", opacity=0.6)
+fig.add_scatter(x=yearly["연도"], y=a * yearly["연도"] + b, mode="lines", name="회귀 직선")
+st.plotly_chart(fig, width="stretch")
+st.caption(f"직선을 만든 해: {len(yearly)}개 ({yearly['연도'].min()}~{yearly['연도'].max()}년)")
 
-# 최소제곱법으로 직선 y = slope*x + intercept를 계산합니다.
-slope, intercept = np.polyfit(years, temps, 1)
-correlation = float(np.corrcoef(years, temps)[0, 1])
-
-start_year = int(annual["연도"].min())
-end_year = int(annual["연도"].max())
-year_count = len(annual)
-
-st.subheader("연도 선택")
-selected_year = st.slider(
-    "예측할 연도를 선택하세요",
-    min_value=1900,
-    max_value=2100,
-    value=2026,
-    step=1,
-)
-predicted_temp = slope * selected_year + intercept
-
-metric_col1, metric_col2, metric_col3 = st.columns(3)
-with metric_col1:
-    st.metric(f"{selected_year}년 예상 연평균기온", f"{predicted_temp:.2f} °C")
-with metric_col2:
-    st.metric("상관계수", f"{correlation:.4f}")
-with metric_col3:
-    st.metric("회귀에 사용한 연도 수", f"{year_count}년")
+st.metric("연도와 연평균기온의 상관계수", f"{yearly['연도'].corr(yearly['연평균기온']):.3f}")
+year = st.slider("연도를 고르세요", 1900, 2100, 2045)
+st.metric(f"{year}년 예상 연평균기온", f"{a * year + b:.1f}℃")
+if year < yearly["연도"].min() or year > yearly["연도"].max():
+    st.info("학습 범위 밖의 외삽값입니다. 실제 미래 기온을 보장하지 않습니다.")
