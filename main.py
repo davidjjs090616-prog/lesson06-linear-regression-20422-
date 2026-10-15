@@ -1,3 +1,67 @@
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import streamlit as st
+
+DATA_URL = (
+    "https://raw.githubusercontent.com/greatsong/modudata/"
+    "bb860932644270ad1199f10d3e7670e30231bce4/data/seoul.csv"
+)
+CUTOFF_YEAR = 2025
+MIN_OBSERVATION_DAYS = 300
+
+
+st.set_page_config(page_title="기온 예측기", page_icon="🌡️", layout="wide")
+st.title("🌡️ 기온 예측기")
+st.caption("서울의 연평균기온 데이터를 이용한 단순 선형 회귀 예측")
+
+
+@st.cache_data
+def load_annual_data():
+    """CSV를 읽고, 유효한 평균기온 관측일이 300일 이상인 연도만 반환합니다."""
+    df = pd.read_csv(DATA_URL, encoding="utf-8")
+
+    required_columns = {"날짜", "평균기온"}
+    missing = required_columns - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV에 필요한 열이 없습니다: {', '.join(sorted(missing))}")
+
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df["평균기온"] = pd.to_numeric(df["평균기온"], errors="coerce")
+    df = df.dropna(subset=["날짜", "평균기온"]).copy()
+
+    # 수업 기준 기간인 2025년까지의 데이터만 사용합니다.
+    df = df[df["날짜"].dt.year <= CUTOFF_YEAR].copy()
+    df["연도"] = df["날짜"].dt.year
+
+    # 같은 날짜에 중복 행이 있으면 날짜별 평균을 먼저 계산해 관측일을 중복 집계하지 않습니다.
+    daily = (
+        df.groupby(["연도", df["날짜"].dt.date], as_index=False)["평균기온"]
+        .mean()
+        .rename(columns={"날짜": "관측날짜"})
+    )
+
+    annual = (
+        daily.groupby("연도")
+        .agg(
+            연평균기온=("평균기온", "mean"),
+            관측일수=("평균기온", "count"),
+        )
+        .reset_index()
+    )
+
+    annual = annual[annual["관측일수"] >= MIN_OBSERVATION_DAYS]
+    annual = annual.sort_values("연도").reset_index(drop=True)
+
+    if len(annual) < 2:
+        raise ValueError("회귀 분석을 하기에 충분한 연도가 없습니다.")
+
+    return annual
+
+
+try:
+    annual = load_annual_data()
+except Exception as exc:
     st.error("서울 기온 데이터를 불러오거나 처리하는 중 문제가 발생했습니다.")
     st.exception(exc)
     st.stop()
@@ -30,78 +94,3 @@ with metric_col2:
     st.metric("상관계수", f"{correlation:.4f}")
 with metric_col3:
     st.metric("회귀에 사용한 연도 수", f"{year_count}년")
-
-st.caption(
-    f"회귀 직선에 사용한 기간: {start_year}년~{end_year}년 "
-    f"({year_count}개 연도, 연도별 유효 관측일 {MIN_OBSERVATION_DAYS}일 이상)"
-)
-
-# 산점도, 회귀 직선, 슬라이더로 선택한 연도의 예측 지점을 함께 표시합니다.
-line_years = np.linspace(start_year, 2100, 300)
-line_temps = slope * line_years + intercept
-
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(
-        x=annual["연도"],
-        y=annual["연평균기온"],
-        mode="markers",
-        name="관측 연평균기온",
-        marker=dict(size=7, opacity=0.75),
-        customdata=annual[["관측일수"]].to_numpy(),
-        hovertemplate=(
-            "연도: %{x:.0f}년<br>"
-            "연평균기온: %{y:.2f} °C<br>"
-            "관측일수: %{customdata[0]}일<extra></extra>"
-        ),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=line_years,
-        y=line_temps,
-        mode="lines",
-        name="선형 회귀 직선",
-        line=dict(width=3),
-        hovertemplate="연도: %{x:.0f}년<br>회귀 기온: %{y:.2f} °C<extra></extra>",
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=[selected_year],
-        y=[predicted_temp],
-        mode="markers",
-        name=f"{selected_year}년 예측",
-        marker=dict(size=13, symbol="star"),
-        hovertemplate="%{x:.0f}년 예상 기온: %{y:.2f} °C<extra></extra>",
-    )
-)
-fig.update_layout(
-    title="서울 연평균기온과 선형 회귀 직선",
-    xaxis_title="연도",
-    yaxis_title="연평균기온 (°C)",
-    hovermode="closest",
-    legend_title="범례",
-    margin=dict(l=20, r=20, t=60, b=20),
-)
-st.plotly_chart(fig, use_container_width=True)
-
-with st.expander("연도별 평균기온 데이터 보기"):
-    display_df = annual.rename(
-        columns={"연도": "연도", "연평균기온": "연평균기온 (°C)", "관측일수": "관측일수"}
-    ).copy()
-    display_df["연평균기온 (°C)"] = display_df["연평균기온 (°C)"].round(2)
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-with st.expander("분석 방법과 주의사항"):
-    st.markdown(
-        """
-        - 날짜별 평균기온이 유효한 관측만 사용합니다.
-        - 2025년 이후 자료는 제외하고, 연도별 유효 관측일이 300일 미만인 해도 제외합니다.
-        - 연평균기온을 계산한 뒤, 연도와 연평균기온 사이의 피어슨 상관계수를 구합니다.
-        - 회귀 직선은 최소제곱법으로 계산한 단순 선형 회귀입니다.
-        - **예상 기온은 과거 추세를 직선으로 연장한 값**입니다. 기후 변화의 복잡한 원인이나 미래의 변동을 모두 반영하지 않으므로 실제 기온 예보로 해석하면 안 됩니다.
-        """
-    )
-
-st.caption("데이터 출처: 제공된 서울 기온 CSV 파일")
